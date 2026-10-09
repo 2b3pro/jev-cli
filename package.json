@@ -1,0 +1,39 @@
+{
+  "name": "jev-cli",
+  "version": "0.1.0",
+  "description": "Unofficial command-line interface for TypeSafe AI's Jev model: fast yes/no, choice and score decisions from your shell.",
+  "type": "module",
+  "bin": {
+    "jev": "./src/cli.ts"
+  },
+  "files": [
+    "src",
+    "examples",
+    "README.md",
+    "QUICKSTART.md",
+    "CLI-REFERENCE.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "jev": "bun src/cli.ts"
+  },
+  "keywords": ["typesafe", "jev", "system-one", "classification", "cli", "bun"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2b3pro/jev-cli.git"
+  },
+  "author": "2b3pro",
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "typescript": "^7.0.2"
+  }
+}

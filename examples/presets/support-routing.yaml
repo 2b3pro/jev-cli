@@ -1,0 +1,22 @@
+# Support ticket routing, modeled on the example in TypeSafe's API docs.
+#   cat ticket.txt | jev run examples/presets/support-routing.yaml
+questions:
+  department:
+    type: choice
+    instructions: Which team should handle this ticket?
+    criteria:
+      billing: Payments, refunds, invoices, payouts
+      technical: Bugs, errors, outages, integrations
+      account: Login, access, profile, cancellation
+      sales: Pricing, plans, upgrades
+  angry:
+    type: noul
+    instructions: Is the customer upset or frustrated?
+  severity:
+    type: score
+    instructions: How severe is the customer's problem?
+    criteria:
+      - Question or minor inconvenience
+      - Something is degraded but usable
+      - Blocked from a core task
+      - Losing money or data right now

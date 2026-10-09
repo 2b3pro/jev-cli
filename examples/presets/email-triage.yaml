@@ -1,0 +1,26 @@
+# Email triage: one call answers all three questions.
+#   jev run examples/presets/email-triage.yaml --state @email.txt --raw
+#   jq -c '{id, body}' inbox.json | jev batch examples/presets/email-triage.yaml --field body
+questions:
+  needs_reply:
+    type: noul
+    instructions: Does this email need a personal reply from me?
+    criteria:
+      true: A person is asking me something or waiting on me
+      false: Automated, informational, or already resolved
+  kind:
+    type: choice
+    instructions: What kind of email is this?
+    criteria:
+      personal: From a friend or family member
+      work: About a client, project, or business matter
+      transactional: Receipts, shipping, account notices
+      newsletter: Newsletters, digests, and marketing
+  urgency:
+    type: score
+    instructions: How soon does this need my attention?
+    criteria:
+      - Can wait a week or more
+      - Sometime this week
+      - Today
+      - Right now
