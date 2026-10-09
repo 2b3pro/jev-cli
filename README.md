@@ -129,6 +129,11 @@ Jev only reads text. Anything you can convert to text on stdout can be piped in:
 pdftotext invoice.pdf - | jev choose "What kind of document is this?" invoice receipt contract statement --raw
 # invoice
 
+# Scanned PDF with no text layer: OCR only the first two pages (brew/apt install ocrmypdf)
+ocrmypdf --pages 1-2 --sidecar - --output-type none -q scan.pdf /dev/null \
+  | jev choose "What kind of document is this?" invoice receipt contract statement --raw
+# statement
+
 # Web page (textutil is built into macOS; `pandoc -f html -t plain` works anywhere)
 curl -sL https://example.com/post | textutil -stdin -stdout -format html -convert txt \
   | jev choose "What kind of page is this?" news tutorial "product=Product announcement" opinion --raw
@@ -143,6 +148,11 @@ gh issue view 42 --json title,body -q '.title + "\n\n" + .body' \
 pbpaste | jev choose "What's the tone of this message?" friendly neutral annoyed angry --raw
 # annoyed
 ```
+
+How the OCR recipe works:
+- **Flags:** `--sidecar -` sends the recognized text to stdout. `--output-type none`, with `/dev/null` as the output file, skips writing a new PDF.
+- **Speed:** OCR runs on pages 1-2 only, so even a long scan takes a second or two.
+- **PDFs that already have text:** `ocrmypdf` refuses these (exit 6, "page already has text"). Nothing reaches `jev`, which exits 2 instead of guessing. Use `pdftotext` for those files, or add `--force-ocr` to OCR them anyway.
 
 ### Example: sort a folder of PDFs
 
@@ -159,7 +169,7 @@ done
 
 Here's how the loop handles edge cases:
 - **Long documents:** `-l 2` reads only the first two pages. The first pages usually identify a document, and Jev accepts about 32k tokens of state per request.
-- **Scanned PDFs:** these have no text layer, so `pdftotext` returns nothing. `jev` reports "State is empty" and exits 2, and `|| continue` skips that file instead of filing it under a bogus label. OCR scans first, for example with `ocrmypdf`.
+- **Scanned PDFs:** these have no text layer, so `pdftotext` returns nothing. `jev` reports "State is empty" and exits 2, and `|| continue` skips that file instead of filing it under a bogus label. To include scans, swap in the `ocrmypdf` recipe above.
 - **Going further:** the loop prints a plan rather than moving anything. Once you trust the labels, swap the `printf` for a `mv`.
 
 ### Example: check a draft's tone from the clipboard
