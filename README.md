@@ -139,7 +139,7 @@ gh issue view 42 --json title,body -q '.title + "\n\n" + .body' \
   | jev choose "Which label fits this issue?" bug feature question docs --raw
 # bug
 
-# Clipboard (macOS)
+# Clipboard (macOS; in Windows PowerShell use Get-Clipboard instead of pbpaste)
 pbpaste | jev choose "What's the tone of this message?" friendly neutral annoyed angry --raw
 # annoyed
 ```
@@ -161,6 +161,45 @@ Here's how the loop handles edge cases:
 - **Long documents:** `-l 2` reads only the first two pages. The first pages usually identify a document, and Jev accepts about 32k tokens of state per request.
 - **Scanned PDFs:** these have no text layer, so `pdftotext` returns nothing. `jev` reports "State is empty" and exits 2, and `|| continue` skips that file instead of filing it under a bogus label. OCR scans first, for example with `ocrmypdf`.
 - **Going further:** the loop prints a plan rather than moving anything. Once you trust the labels, swap the `printf` for a `mv`.
+
+### Example: check a draft's tone from the clipboard
+
+Copy a message you're about to send, run the check, and see whether it might read as harsh. This example shows why `gate` uses three exit codes: an empty clipboard or a network error lands in its own branch instead of being reported as "harsh".
+
+**macOS** (as a notification, from a keyboard shortcut):
+
+```zsh
+export PATH="$HOME/.bun/bin:$PATH"   # Shortcuts runs scripts with a minimal PATH
+
+pbpaste | jev gate "Could this message come across as rude, curt, or passive-aggressive?" --max 0.3 -q
+case $? in
+  0) msg="Tone looks fine." ;;
+  1) msg="This might read as harsh. Soften it before sending?" ;;
+  *) msg="jev couldn't check the clipboard." ;;
+esac
+osascript -e "display notification \"$msg\" with title \"Tone check\""
+```
+
+To bind it to a key:
+1. In the Shortcuts app, create a shortcut with a **Run Shell Script** action (shell: zsh) and paste the script into it.
+2. Open the shortcut's details and choose **Add Keyboard Shortcut**.
+3. If the action won't run, turn on **Allow Running Scripts** in Shortcuts › Settings › Advanced.
+
+You don't need an `export` line for the key, because `jev` reads it from the Keychain.
+
+**Windows** (PowerShell 7):
+
+```powershell
+# Windows has no Keychain lookup, so set the key once: setx TYPESAFE_API_KEY "<key>"
+Get-Clipboard | jev gate "Could this message come across as rude, curt, or passive-aggressive?" --max 0.3 -q
+switch ($LASTEXITCODE) {
+  0       { "Tone looks fine." }
+  1       { "This might read as harsh. Soften it before sending?" }
+  default { "jev couldn't check the clipboard." }
+}
+```
+
+Use PowerShell 7 (`pwsh`). Windows PowerShell 5.1 pipes text to programs as ASCII, so curly quotes, accents and emoji arrive as `?`.
 
 ## Presets
 
