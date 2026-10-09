@@ -1,4 +1,4 @@
-# jev
+# jev-cli
 
 ![jev: fast decisions from your shell](docs/jev-hero.png)
 
@@ -119,6 +119,48 @@ A failed line becomes an `{"line": n, "input": ..., "error": {...}}` record and 
 ```bash
 jev models --raw
 ```
+
+## Getting text into jev
+
+Jev only reads text. Anything you can convert to text on stdout can be piped in:
+
+```bash
+# PDF (pdftotext comes with poppler: brew install poppler / apt install poppler-utils)
+pdftotext invoice.pdf - | jev choose "What kind of document is this?" invoice receipt contract statement --raw
+# invoice
+
+# Web page (textutil is built into macOS; `pandoc -f html -t plain` works anywhere)
+curl -sL https://example.com/post | textutil -stdin -stdout -format html -convert txt \
+  | jev choose "What kind of page is this?" news tutorial "product=Product announcement" opinion --raw
+# product
+
+# GitHub issue
+gh issue view 42 --json title,body -q '.title + "\n\n" + .body' \
+  | jev choose "Which label fits this issue?" bug feature question docs --raw
+# bug
+
+# Clipboard (macOS)
+pbpaste | jev choose "What's the tone of this message?" friendly neutral annoyed angry --raw
+# annoyed
+```
+
+### Example: sort a folder of PDFs
+
+```bash
+for f in ~/Downloads/*.pdf; do
+  kind=$(pdftotext -l 2 "$f" - 2>/dev/null | jev choose "What kind of document is this?" \
+    invoice receipt contract statement other --raw) || continue
+  printf '%s\t%s\n' "$kind" "$f"
+done
+# contract   /Users/you/Downloads/nda.pdf
+# invoice    /Users/you/Downloads/acme-20431.pdf
+# receipt    /Users/you/Downloads/cafe.pdf
+```
+
+Here's how the loop handles edge cases:
+- **Long documents:** `-l 2` reads only the first two pages. The first pages usually identify a document, and Jev accepts about 32k tokens of state per request.
+- **Scanned PDFs:** these have no text layer, so `pdftotext` returns nothing. `jev` reports "State is empty" and exits 2, and `|| continue` skips that file instead of filing it under a bogus label. OCR scans first, for example with `ocrmypdf`.
+- **Going further:** the loop prints a plan rather than moving anything. Once you trust the labels, swap the `printf` for a `mv`.
 
 ## Presets
 
