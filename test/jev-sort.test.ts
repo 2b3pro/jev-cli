@@ -188,6 +188,13 @@ describe("jev-sort", () => {
     expect(finder[1]!.at(-1)).toMatch(/^jev-sort \d{4}-\d{2}-\d{2}: Medical \(90%\)/);
   });
 
+  test("a missing or malformed --describe file is a clean error", async () => {
+    const d = deps({ text: {}, pick: () => ["Medical", 1] });
+    expect(await main([inbox, "--into", into, "--describe", join(root, "nope.yaml")], d)).toBe(2);
+    writeFileSync(join(root, "list.yaml"), "- just\n- a list\n");
+    expect(await main([inbox, "--into", into, "--describe", join(root, "list.yaml")], d)).toBe(2);
+  });
+
   test("rejects unknown categories and missing folders", async () => {
     expect(await main([inbox, "--into", into, "--categories", "Medical,Nope"], deps({ text: {}, pick: () => ["Medical", 1] }))).toBe(2);
     expect(await main([join(root, "missing"), "--into", into], deps({ text: {}, pick: () => ["Medical", 1] }))).toBe(2);

@@ -542,7 +542,13 @@ export async function main(argv: string[], deps: Deps = { runner: run, ocr: ocrm
     deps.log(`jev-sort: no category folders found in ${into}`);
     return 2;
   }
-  const written = loadDescriptions(v.describe as string | undefined);
+  let written: Record<string, string>;
+  try {
+    written = loadDescriptions(v.describe as string | undefined);
+  } catch (error) {
+    deps.log(`jev-sort: cannot read --describe file: ${(error as Error).message}`);
+    return 2;
+  }
   const categories = Object.fromEntries(chosen.map((c) => [c, describeCategory(written[c], learnedExamples(join(into, c)))]));
 
   const opts: Options = {
