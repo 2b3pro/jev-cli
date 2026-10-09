@@ -172,6 +172,8 @@ Here's how the loop handles edge cases:
 - **Scanned PDFs:** these have no text layer, so `pdftotext` returns nothing. `jev` reports "State is empty" and exits 2, and `|| continue` skips that file instead of filing it under a bogus label. To include scans, swap in the `ocrmypdf` recipe above.
 - **Going further:** the loop prints a plan rather than moving anything. Once you trust the labels, swap the `printf` for a `mv`.
 
+For the full version, see [`scripts/jev-sort`](scripts/README.md#jev-sort). It adds a confidence threshold with a review folder, learns your categories from what you've already filed, and can rename files, add Finder tags and comments, and make scans searchable.
+
 ### Example: check a draft's tone from the clipboard
 
 Copy a message you're about to send, run the check, and see whether it might read as harsh. This example shows why `gate` uses three exit codes: an empty clipboard or a network error lands in its own branch instead of being reported as "harsh".

@@ -1,0 +1,12 @@
+{
+  "title": "DocumentName",
+  "type": "object",
+  "x-order": ["date", "sender", "title"],
+  "properties": {
+    "date": { "type": "string", "description": "The main date printed on the document, formatted YYYY-MM-DD. Empty string if no date is printed." },
+    "sender": { "type": "string", "description": "The company or person who issued the document, as printed." },
+    "title": { "type": "string", "description": "A 2 to 5 word description of the document, e.g. 'Invoice 20431' or 'September statement'." }
+  },
+  "required": ["date", "sender", "title"],
+  "additionalProperties": false
+}
