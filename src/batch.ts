@@ -3,6 +3,7 @@
 // ============================================================================
 
 import type { EntryType, Questions, TypeSafeClient } from "@typesafe-ai/sdk";
+import { orderedMap } from "./concurrency.ts";
 import { describeError } from "./client.ts";
 import { flattenAnswers, type Answer } from "./output.ts";
 
@@ -27,22 +28,19 @@ export interface BatchSummary {
   failed: number;
 }
 
-/** Split input into items: JSON values where a line parses, plain text otherwise. Blank lines are skipped. */
-export function parseBatchInput(text: string): BatchItem[] {
-  const items: BatchItem[] = [];
-  text.split(/\r?\n/).forEach((raw, index) => {
-    if (raw.trim() === "") return;
+/** Parse lines incrementally, preserving physical line numbers and skipping blanks. */
+export async function* parseBatchLines(lines: AsyncIterable<string>): AsyncGenerator<BatchItem> {
+  let line = 0;
+  for await (const raw of lines) {
+    line++;
+    if (raw.trim() === "") continue;
     let input: unknown = raw;
     try {
       const value: unknown = JSON.parse(raw);
-      if (typeof value === "object" && value !== null) input = value;
-      else if (typeof value === "string") input = value;
-    } catch {
-      // Not JSON: the line itself is the state.
-    }
-    items.push({ line: index + 1, input });
-  });
-  return items;
+      if ((typeof value === "object" && value !== null) || typeof value === "string") input = value;
+    } catch { /* Plain text is also valid input. */ }
+    yield { line, input };
+  }
 }
 
 /** The state to send for one item, or an error message. */
@@ -67,14 +65,12 @@ export function stateFor(item: BatchItem, field: string | undefined): { state: E
  * Results are written as soon as all earlier lines are done, so output order matches input order.
  */
 export async function runBatch(
-  items: BatchItem[],
+  items: Iterable<BatchItem> | AsyncIterable<BatchItem>,
   client: TypeSafeClient | undefined,
   options: BatchOptions,
-  write: (line: string) => void,
+  write: (line: string) => void | Promise<void>,
 ): Promise<BatchSummary> {
-  const results: (string | undefined)[] = new Array(items.length);
-  let next = 0;
-  let flushed = 0;
+  let total = 0;
   let failed = 0;
 
   async function processItem(item: BatchItem): Promise<string> {
@@ -101,19 +97,9 @@ export async function runBatch(
     }
   }
 
-  async function worker(): Promise<void> {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await processItem(items[index]!);
-      while (flushed < items.length && results[flushed] !== undefined) {
-        write(results[flushed]!);
-        results[flushed] = "";
-        flushed++;
-      }
-    }
+  for await (const result of orderedMap(items, options.concurrency, processItem)) {
+    await write(result);
+    total++;
   }
-
-  const workers = Math.max(1, Math.min(options.concurrency, items.length));
-  await Promise.all(Array.from({ length: workers }, worker));
-  return { total: items.length, failed };
+  return { total, failed };
 }

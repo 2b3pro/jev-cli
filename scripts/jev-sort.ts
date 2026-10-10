@@ -5,7 +5,7 @@
 //
 // For each PDF in an inbox folder:
 //   1. Read the first two pages (pdftotext, or OCR when the PDF is a bare scan)
-//   2. Ask `jev choose` which category folder it belongs in
+//   2. Ask Jev which category folder it belongs in
 //   3. Confident: move it there (optionally under a year folder). Unsure: move it to a review folder.
 //   4. Optionally rename it with Apple's on-device `fm` model, add a Finder tag, add a Finder comment,
 //      or make it searchable.
@@ -16,6 +16,12 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFile
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, relative } from "node:path";
 import { parseArgs } from "node:util";
+import { choice, type TypeSafeClient } from "@typesafe-ai/sdk";
+import { createClient, defaultModel, describeError } from "../src/client.ts";
+import { processIo, type Io } from "../src/io.ts";
+import { yesNoQuestion } from "../src/questions.ts";
+import { orderedMap } from "../src/concurrency.ts";
+import nameSchema from "./fm-name.schema.json";
 
 // ----------------------------------------------------------------------------
 // External tools
@@ -108,18 +114,43 @@ export interface Classification {
   ranked: [string, number][];
 }
 
-export async function classify(text: string, categories: Record<string, string | null>, runner: Runner): Promise<Classification> {
-  const options = Object.entries(categories).map(([label, description]) => (description ? `${label}=${description}` : label));
-  const r = await runner(
-    ["jev", "choose", "--state", "-", "--", "Which folder should this document be filed in?", ...options],
-    text.slice(0, MAX_STATE_CHARS),
-  );
-  if (r.code !== 0) throw new Error(`jev failed (exit ${r.code}): ${firstLine(r.err)}`);
-  const answer = JSON.parse(r.out).answers.answer as { choice: string; confidence: number; probabilities: Record<string, number> };
+export interface Decisions {
+  classify(text: string, categories: Record<string, string | null>): Promise<Classification>;
+  garbleProbability(name: string): Promise<number>;
+}
+
+/** One lazily created SDK client (and credential lookup) for the entire sorting run. */
+export function createDecisions(io: Io = processIo()): Decisions {
+  let api: TypeSafeClient | undefined;
+  const client = () => api ??= createClient(io, { verbose: false });
   return {
-    label: answer.choice,
-    confidence: answer.confidence,
-    ranked: Object.entries(answer.probabilities).sort((a, b) => b[1] - a[1]),
+    async classify(text, categories) {
+      const data = await client().systemOne({
+        model: defaultModel(io), state: text.slice(0, MAX_STATE_CHARS),
+        questions: { answer: choice("Which folder should this document be filed in?", categories) },
+      });
+      const answer = data.answers.answer;
+      if (!answer || answer.type !== "choice" || !Object.hasOwn(categories, answer.choice)) {
+        throw new Error("Jev returned an unknown category");
+      }
+      return {
+        label: answer.choice, confidence: answer.confidence,
+        ranked: Object.entries(answer.probabilities).sort((a, b) => b[1] - a[1]),
+      };
+    },
+    async garbleProbability(name) {
+      const data = await client().systemOne({
+        model: defaultModel(io), state: name,
+        questions: { answer: yesNoQuestion(
+          "Does this proposed filename contain garbled OCR fragments or nonsense words?",
+          "Contains random letter strings or broken fragments that are not real words or names",
+          "Every word is a real word, name, number or abbreviation",
+        ) },
+      });
+      const answer = data.answers.answer;
+      if (!answer || answer.type !== "noul") throw new Error("Jev returned an invalid name check");
+      return answer.noul;
+    },
   };
 }
 
@@ -127,7 +158,6 @@ export async function classify(text: string, categories: Record<string, string |
 // Naming (Apple's on-device fm model, checked against the text)
 // ----------------------------------------------------------------------------
 
-const NAME_SCHEMA = join(import.meta.dir, "fm-name.schema.json");
 const MAX_NAME_INPUT = 6_000;
 const MAX_NAME_LENGTH = 120;
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
@@ -193,13 +223,22 @@ export interface NameProposal {
   note: string;
 }
 
-export async function proposeName(text: string, runner: Runner): Promise<NameProposal> {
-  const r = await runner([
-    "fm", "respond", "--schema", NAME_SCHEMA, "--greedy", "--no-stream",
-    "-i", "Extract filing details from the document. Use only information printed in it.",
-    "--text", text.slice(0, MAX_NAME_INPUT),
-    "Name this document.",
-  ]);
+export async function proposeName(text: string, runner: Runner, decisions: Decisions): Promise<NameProposal> {
+  // External fm needs a real file, including when this script is compiled into a binary.
+  const work = mkdtempSync(join(tmpdir(), "jev-name-"));
+  let r: RunResult;
+  try {
+    const schema = join(work, "schema.json");
+    await Bun.write(schema, JSON.stringify(nameSchema));
+    r = await runner([
+      "fm", "respond", "--schema", schema, "--greedy", "--no-stream",
+      "-i", "Extract filing details from the document. Use only information printed in it.",
+      "--text", text.slice(0, MAX_NAME_INPUT),
+      "Name this document.",
+    ]);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
   if (r.code !== 0) return { date: "", note: `fm failed: ${firstLine(r.err)}` };
 
   let fields: { date?: string; sender?: string; title?: string };
@@ -212,14 +251,13 @@ export async function proposeName(text: string, runner: Runner): Promise<NamePro
   const base = buildName(date, fields.sender, fields.title);
   if (!base || base === date) return { date, note: "no name found" };
 
-  const gate = await runner(
-    ["jev", "ask", "Does this proposed filename contain garbled OCR fragments or nonsense words?",
-      "--yes", "Contains random letter strings or broken fragments that are not real words or names",
-      "--no", "Every word is a real word, name, number or abbreviation", "--raw", "--state", "-"],
-    base,
-  );
-  const p = Number(gate.out.trim());
-  if (gate.code !== 0 || !Number.isFinite(p)) return { date, note: "could not check the name; keeping the original" };
+  let p: number;
+  try {
+    p = await decisions.garbleProbability(base);
+    if (!Number.isFinite(p)) throw new Error("invalid probability");
+  } catch {
+    return { date, note: "could not check the name; keeping the original" };
+  }
   if (p >= 0.5) return { date, note: `proposed name looked garbled (${p.toFixed(2)}); keeping the original` };
 
   const dateNote = !fields.date ? "no date" : date === fields.date ? "date verified" : date ? "year only" : "date not in text, dropped";
@@ -346,6 +384,7 @@ export interface PlanItem {
 }
 
 export interface Deps {
+  decisions?: Decisions;
   runner: Runner;
   ocr: Ocr;
   log: (line: string) => void;
@@ -357,7 +396,7 @@ async function extractText(pdf: string, deps: Deps): Promise<{ text: string; sou
   return { text: await deps.ocr(pdf, deps.runner), source: "ocr" };
 }
 
-export async function planOne(pdf: string, opts: Options, deps: Deps, reserved: Set<string>): Promise<PlanItem> {
+async function prepareOne(pdf: string, opts: Options, deps: Deps & { decisions: Decisions }): Promise<PlanItem> {
   const item: PlanItem = { file: basename(pdf), action: "error" };
   try {
     const { text, source } = await extractText(pdf, deps);
@@ -365,11 +404,11 @@ export async function planOne(pdf: string, opts: Options, deps: Deps, reserved: 
     if (text.replace(/\s/g, "").length < 20) {
       item.action = "review";
       item.name_note = "no readable text";
-      item.dest = uniquePath(opts.reviewDir, basename(pdf, extname(pdf)), extname(pdf).toLowerCase() || ".pdf", reserved);
+      item.dest = join(opts.reviewDir, basename(pdf, extname(pdf)) + (extname(pdf).toLowerCase() || ".pdf"));
       return item;
     }
 
-    const c = await classify(text, opts.categories, deps.runner);
+    const c = await deps.decisions.classify(text, opts.categories);
     item.label = c.label;
     item.confidence = c.confidence;
     item.ranked = c.ranked.slice(0, 3);
@@ -378,7 +417,7 @@ export async function planOne(pdf: string, opts: Options, deps: Deps, reserved: 
     let base = basename(pdf, extname(pdf));
     let year = "";
     if (opts.rename) {
-      const proposal = await proposeName(text, deps.runner);
+      const proposal = await proposeName(text, deps.runner, deps.decisions);
       item.name_note = proposal.note;
       if (proposal.base) base = proposal.base;
       year = proposal.date.slice(0, 4);
@@ -386,11 +425,24 @@ export async function planOne(pdf: string, opts: Options, deps: Deps, reserved: 
     if (!year) year = String(statSync(pdf).birthtime.getFullYear());
 
     const dir = item.action === "file" ? join(opts.into, c.label, opts.byYear ? year : "") : opts.reviewDir;
-    item.dest = uniquePath(dir, base, extname(pdf).toLowerCase() || ".pdf", reserved);
+    item.dest = join(dir, base + (extname(pdf).toLowerCase() || ".pdf"));
   } catch (error) {
     item.action = "error";
-    item.error = (error as Error).message;
+    item.error = describeError(error).message;
   }
+  return item;
+}
+
+function reserveDestination(item: PlanItem, reserved: Set<string>): void {
+  if (item.dest && item.action !== "error") {
+    const ext = extname(item.dest);
+    item.dest = uniquePath(dirname(item.dest), basename(item.dest, ext), ext, reserved);
+  }
+}
+
+export async function planOne(pdf: string, opts: Options, deps: Deps, reserved: Set<string>): Promise<PlanItem> {
+  const item = await prepareOne(pdf, opts, { ...deps, decisions: deps.decisions ?? createDecisions() });
+  reserveDestination(item, reserved);
   return item;
 }
 
@@ -411,7 +463,7 @@ export async function applyOne(pdf: string, item: PlanItem, opts: Options, deps:
     }
     item.applied = true;
   } catch (error) {
-    item.error = (error as Error).message;
+    item.error = describeError(error).message;
     item.action = "error";
   }
 }
@@ -434,6 +486,7 @@ OPTIONS
   --categories <a,b>    Use only these subfolders as categories
   --describe <file>     YAML or JSON map of category: description, for folders with few examples
   --review-dir <dir>    Where unsure files go (default: <into>/_Review)
+  --concurrency <n>     PDFs to prepare concurrently, 1-8 (default 2)
   --min <p>             Confidence needed to file, 0-1 (default 0.6)
   --by-year             File into <category>/<year>/, using the document's year when verified,
                         else the file's creation year
@@ -447,7 +500,7 @@ OPTIONS
   -h, --help            Show this help
 
 REQUIRES
-  jev and pdftotext (poppler) on PATH; ocrmypdf for scanned PDFs and --searchable;
+  TypeSafe API key and pdftotext (poppler) on PATH; ocrmypdf for scanned PDFs and --searchable;
   fm (macOS with Apple Intelligence) for --rename.
 
 EXAMPLES
@@ -488,6 +541,7 @@ export async function main(argv: string[], deps: Deps = { runner: run, ocr: ocrm
       describe: { type: "string" },
       "review-dir": { type: "string" },
       min: { type: "string" },
+      concurrency: { type: "string" },
       "by-year": { type: "boolean" },
       rename: { type: "boolean" },
       tag: { type: "boolean" },
@@ -525,6 +579,12 @@ export async function main(argv: string[], deps: Deps = { runner: run, ocr: ocrm
     return 2;
   }
 
+  const concurrency = Number(v.concurrency ?? 2);
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) {
+    deps.log("jev-sort: --concurrency must be an integer between 1 and 8");
+    return 2;
+  }
+
   const min = Number(v.min ?? 0.6);
   if (!(min >= 0 && min <= 1)) {
     deps.log("jev-sort: --min must be between 0 and 1");
@@ -538,8 +598,8 @@ export async function main(argv: string[], deps: Deps = { runner: run, ocr: ocrm
     deps.log(`jev-sort: no such category folder in ${into}: ${missing.join(", ")}`);
     return 2;
   }
-  if (chosen.length < 1) {
-    deps.log(`jev-sort: no category folders found in ${into}`);
+  if (chosen.length < 2 || chosen.length > 255) {
+    deps.log("jev-sort: need between 2 and 255 category folders");
     return 2;
   }
   let written: Record<string, string>;
@@ -577,9 +637,13 @@ export async function main(argv: string[], deps: Deps = { runner: run, ocr: ocrm
   deps.log(`jev-sort: ${pdfs.length} PDFs, categories: ${chosen.join(", ")}${opts.apply ? "" : " (dry run)"}`);
   const reserved = new Set<string>();
   const items: PlanItem[] = [];
-  for (const [i, pdf] of pdfs.entries()) {
+  const preparedDeps = { ...deps, decisions: deps.decisions ?? createDecisions() };
+  const prepared = orderedMap(pdfs.entries(), concurrency, async ([i, pdf]) => {
     deps.log(`  [${i + 1}/${pdfs.length}] ${basename(pdf)}`);
-    const item = await planOne(pdf, opts, deps, reserved);
+    return { pdf, item: await prepareOne(pdf, opts, preparedDeps) };
+  });
+  for await (const { pdf, item } of prepared) {
+    reserveDestination(item, reserved);
     if (opts.apply) await applyOne(pdf, item, opts, deps);
     items.push(item);
     console.log(v.json ? JSON.stringify(item) : formatItem(item, opts));

@@ -44,6 +44,18 @@ bun link          # puts `jev` on your PATH
 jev --version
 ```
 
+### Standalone binaries
+
+Build both commands for your current platform:
+
+```bash
+bun run build
+./dist/jev --version
+./dist/jev-sort --help
+```
+
+The binaries include Bun and the SDK, so the destination machine does not need Bun installed. Copy them to a directory on your PATH. `jev-sort` still needs the external PDF/OCR tools described in [its requirements](scripts/README.md#requirements); its naming schema is embedded in the binary.
+
 ### API key
 
 `jev` looks for `TYPESAFE_API_KEY` in the environment first, then (on macOS) in the Keychain:
@@ -104,7 +116,7 @@ jev run examples/presets/email-triage.yaml --state @email.txt --raw
 
 ### `batch`: a preset over a stream
 
-Reads stdin one line at a time. JSON lines become structured state (or use `--field` to pick one field by dot path), and any other line is used as plain text. The output is one JSON object per input line, **in input order**, with the original `input` echoed back so you can join on it.
+Starts processing as lines arrive, before stdin closes. Input and pending results are bounded by the concurrency window, plus the current input chunk and unfinished line. Slow output consumers pause processing. JSON lines become structured state (or use `--field` to pick one field by dot path), and any other line is used as plain text. The output is one JSON object per input line, **in input order**, with the original `input` echoed back so you can join on it.
 
 ```bash
 jq -c '.[] | {id, body}' inbox.json \
@@ -112,7 +124,7 @@ jq -c '.[] | {id, body}' inbox.json \
   | jq -c 'select(.answers.needs_reply > 0.7) | .input.id'
 ```
 
-A failed line becomes an `{"line": n, "input": ..., "error": {...}}` record and the batch keeps going. If any line failed, the exit code is 2. At the default `--concurrency` of 8 the request rate stays under the API's published 80 requests per second. Higher values (max 32) can hit rate limits, which the SDK absorbs by retrying with backoff.
+A failed line becomes an `{"line": n, "input": ..., "error": {...}}` record and the batch keeps going. If any line failed, the exit code is 2. `--concurrency` limits outstanding work (default 8, max 32), not requests per second. The SDK retries rate-limit responses with backoff. A slow early request can temporarily stall new work to keep ordered results within the memory bound.
 
 ### `models`
 
@@ -309,8 +321,11 @@ As of October 2026, TypeSafe lists Jev at $0.042 per million input tokens, with 
 ```bash
 bun test            # runs against a fake API, no key or network needed
 bun run typecheck
+bun run build       # dist/jev and dist/jev-sort
 bun src/cli.ts --help
 ```
+
+See [performance checks](docs/performance.md) for local measurements and their limits.
 
 Built on the official [`@typesafe-ai/sdk`](https://www.npmjs.com/package/@typesafe-ai/sdk), which handles retries and typed errors. Presets parse with Bun's built-in YAML, so the SDK is the only runtime dependency.
 

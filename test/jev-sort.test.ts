@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { fakeIo } from "./helpers.ts";
 import { basename, join } from "node:path";
 import {
   buildName,
+  createDecisions,
   cleanPart,
   datesIn,
   discoverCategories,
@@ -61,7 +63,7 @@ beforeEach(() => {
   spyOn(console, "log").mockImplementation(() => {});
 });
 
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+afterEach(() => { mock.restore(); rmSync(root, { recursive: true, force: true }); });
 
 function drop(name: string) {
   writeFileSync(join(inbox, name), "%PDF-fake");
@@ -84,14 +86,6 @@ function deps(fake: Fake, calls: string[][] = []): Deps {
     switch (cmd[0]) {
       case "pdftotext":
         return ok(fake.text[basename(cmd[3]!)] ?? "");
-      case "jev": {
-        if (cmd[1] === "ask") return ok(String(fake.garble ?? 0.05));
-        const labels = cmd.slice(cmd.indexOf("--") + 2).map((o) => o.split("=")[0]!);
-        if (labels.some((l) => l.startsWith("__"))) return { out: "", err: "unexpected hidden option", code: 1 };
-        const [label, conf] = fake.pick(stdin ?? "");
-        const probabilities = Object.fromEntries(labels.map((l) => [l, l === label ? conf : (1 - conf) / (labels.length - 1)]));
-        return ok(JSON.stringify({ answers: { answer: { choice: label, confidence: conf, probabilities } } }));
-      }
       case "fm":
         if (cmd[1] === "available") return ok("System model available");
         return ok(JSON.stringify(fake.name ?? { date: "", sender: "", title: "" }));
@@ -101,7 +95,22 @@ function deps(fake: Fake, calls: string[][] = []): Deps {
         return { out: "", err: `unexpected ${cmd[0]}`, code: 127 };
     }
   };
+  const io = fakeIo({ fetch: async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    const question = body.questions.answer;
+    calls.push(["api", question.type]);
+    let answer;
+    if (question.type === "noul") answer = { type: "noul", noul: fake.garble ?? 0.05 };
+    else {
+      const labels = Object.keys(question.criteria);
+      const [label, confidence] = fake.pick(body.state);
+      answer = { type: "choice", choice: label, confidence,
+        probabilities: Object.fromEntries(labels.map((l) => [l, l === label ? confidence : (1 - confidence) / (labels.length - 1)])) };
+    }
+    return Response.json({ model: "jev-latest", answers: { answer }, usage: { input_tokens: 42, output_tokens: 3 } });
+  } }).io;
   return {
+    decisions: createDecisions(io),
     runner,
     ocr: async (pdf) => fake.ocrText?.[basename(pdf)] ?? "",
     log: () => {},
@@ -149,7 +158,7 @@ describe("jev-sort", () => {
     await main([inbox, "--into", into, "--apply"], fake);
     expect(files(join(root, "Medical"))).toContain("scan.pdf");
     expect(files(join(root, "_Review"))).toEqual(["blank.pdf"]);
-    expect(calls.filter((c) => c[0] === "jev")).toHaveLength(1);
+    expect(calls.filter((c) => c[0] === "api")).toHaveLength(1);
   });
 
   test("--rename --by-year uses the verified date and never overwrites", async () => {
@@ -199,4 +208,77 @@ describe("jev-sort", () => {
     expect(await main([inbox, "--into", into, "--categories", "Medical,Nope"], deps({ text: {}, pick: () => ["Medical", 1] }))).toBe(2);
     expect(await main([join(root, "missing"), "--into", into], deps({ text: {}, pick: () => ["Medical", 1] }))).toBe(2);
   });
+});
+
+
+test("parallel preparation keeps moves, collisions, and output in filename order", async () => {
+  for (const file of ["a.pdf", "b.pdf", "c.pdf"]) drop(file);
+  const text = "Patient visit summary and lab results from the clinic";
+  const d = deps({ text: { "a.pdf": text, "b.pdf": text, "c.pdf": text },
+    pick: () => ["Medical", 0.9], name: { date: "", sender: "Quest", title: "Lab Results" } });
+  const original = d.runner;
+  let active = 0;
+  let peak = 0;
+  const completed: string[] = [];
+  d.runner = async (cmd, stdin) => {
+    if (cmd[0] !== "pdftotext") return original(cmd, stdin);
+    active++;
+    peak = Math.max(peak, active);
+    const file = basename(cmd[3]!);
+    await Bun.sleep(file === "a.pdf" ? 40 : 5);
+    active--;
+    completed.push(file);
+    return original(cmd, stdin);
+  };
+  const output: string[] = [];
+  spyOn(console, "log").mockImplementation((s) => { output.push(String(s)); });
+  expect(await main([inbox, "--into", into, "--concurrency", "2", "--rename", "--json", "--apply"], d)).toBe(0);
+  expect(peak).toBe(2);
+  expect(completed[0]).toBe("b.pdf");
+  const items = output.map((s) => JSON.parse(s));
+  expect(items.map((i) => i.file)).toEqual(["a.pdf", "b.pdf", "c.pdf"]);
+  expect(items.map((i) => basename(i.dest))).toEqual(["Quest Lab Results.pdf", "Quest Lab Results (2).pdf", "Quest Lab Results (3).pdf"]);
+  expect(items.every((i) => i.applied)).toBe(true);
+  expect(files(inbox)).toEqual([]);
+});
+
+test("sort validates concurrency before doing document work", async () => {
+  const calls: string[][] = [];
+  const d = deps({ text: {}, pick: () => ["Medical", 1] }, calls);
+  for (const value of ["0", "9", "1.5", "NaN"]) {
+    expect(await main([inbox, "--into", into, "--concurrency", value], d)).toBe(2);
+  }
+  expect(calls).toEqual([]);
+});
+
+test("shared SDK client looks up credentials once for parallel classification and name checks", async () => {
+  const { fakeApi } = await import("./helpers.ts");
+  const api = fakeApi();
+  const { io } = fakeIo({ fetch: api.fetch, env: { TYPESAFE_API_KEY: undefined, TYPESAFE_DEFAULT_MODEL: "custom-model" } });
+  let lookups = 0;
+  io.keychain = () => { lookups++; return "test-key"; };
+  const decisions = createDecisions(io);
+  await Promise.all([
+    decisions.classify("x".repeat(70_000), { "A=B": "description", Other: null }),
+    decisions.classify("another document", { "A=B": "description", Other: null }),
+    decisions.garbleProbability("Proposed name"),
+  ]);
+  expect(lookups).toBe(1);
+  expect(api.calls).toHaveLength(3);
+  expect(api.calls[0]!.body.state).toHaveLength(60_000);
+  expect(api.calls[0]!.body.questions.answer.criteria).toEqual({ "A=B": "description", Other: null });
+  expect(api.calls.every((call) => call.body.model === "custom-model")).toBe(true);
+});
+
+test("classification failure leaves its file untouched and does not stop later files", async () => {
+  drop("a.pdf"); drop("b.pdf");
+  const d = deps({ text: { "a.pdf": "First readable document from the clinic", "b.pdf": "Second readable document from the clinic" }, pick: () => ["Medical", 0.9] });
+  const classify = d.decisions!.classify;
+  d.decisions!.classify = async (text, categories) => {
+    if (text.startsWith("First")) throw new Error("API unavailable");
+    return classify(text, categories);
+  };
+  expect(await main([inbox, "--into", into, "--apply"], d)).toBe(2);
+  expect(files(inbox)).toEqual(["a.pdf"]);
+  expect(files(join(root, "Medical"))).toContain("b.pdf");
 });

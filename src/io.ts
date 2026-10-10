@@ -9,6 +9,10 @@ import { UsageError } from "./args.ts";
 export interface Io {
   /** Read all of stdin as text. */
   readStdin(): Promise<string>;
+  /** Incremental stdin lines for batch processing. */
+  readLines(): AsyncIterable<string>;
+  /** Backpressure-aware output for batches. */
+  writeLine(line: string): Promise<void>;
   /** True when stdin is an interactive terminal (nothing piped in). */
   stdinIsTTY: boolean;
   /** Read a file as text; undefined when it does not exist. */
@@ -37,9 +41,32 @@ function macKeychain(service: string): string | undefined {
   }
 }
 
+/** Decode chunk boundaries safely, retaining only the unfinished line and current chunk. */
+export async function* textLines(chunks: AsyncIterable<Uint8Array>): AsyncGenerator<string> {
+  const decoder = new TextDecoder();
+  let tail = "";
+  for await (const chunk of chunks) {
+    const text = tail + decoder.decode(chunk, { stream: true });
+    let start = 0;
+    let end: number;
+    while ((end = text.indexOf("\n", start)) !== -1) {
+      const line = text.slice(start, end);
+      yield line.endsWith("\r") ? line.slice(0, -1) : line;
+      start = end + 1;
+    }
+    tail = text.slice(start);
+  }
+  tail += decoder.decode();
+  if (tail) yield tail;
+}
+
 export function processIo(): Io {
   return {
     readStdin: () => Bun.stdin.text(),
+    readLines: () => textLines(Bun.stdin.stream()),
+    writeLine: (line) => new Promise<void>((resolve, reject) => {
+      process.stdout.write(`${line}\n`, (error) => error ? reject(error) : resolve());
+    }),
     stdinIsTTY: Boolean(process.stdin.isTTY),
     async readFile(path) {
       const file = Bun.file(path);

@@ -41,12 +41,15 @@ Trust: Family trust deeds, trustee minutes, trust bank statements
 
 **Confidence:** a file is filed only when jev's confidence reaches `--min` (default 0.6). Anything below that, and any page with no readable text, goes to `--review-dir` (default `<into>/_Review`).
 
+**Parallel preparation:** by default, two PDFs can be extracted and classified concurrently. `--concurrency 1` uses serial preparation; values up to 8 are supported. Destinations, moves, and output stay in filename order, including collision suffixes. Use a lower value when OCR or the on-device model is resource constrained. Classification and name checks share one API client and credential lookup per run.
+
 **Reading the PDF:** jev-sort reads the first two pages with `pdftotext`. Bare scans with no text layer are OCR'd with `ocrmypdf` (pages 1-2 only, so it stays quick).
 
 ### Options
 
 | Option | Effect |
 |---|---|
+| `--concurrency <n>` | Prepare 1-8 PDFs concurrently (default 2). File moves and output remain ordered. |
 | `--rename` | Renames to `<date> <sender> <title>` using Apple's on-device `fm` model. A date is kept only if it's printed in the document; otherwise just the year, if that's printed, or no date at all. If jev judges a proposed name garbled, the original name is kept. |
 | `--by-year` | Files into `<category>/<year>/`, using the document's verified year, or else the file's creation year. |
 | `--tag` | Adds the category as a Finder tag, keeping existing tags (macOS). |
@@ -63,7 +66,7 @@ Trust: Family trust deeds, trustee minutes, trust bank statements
 
 ### Requirements
 
-`jev` and `pdftotext` (poppler). Add `ocrmypdf` for scanned PDFs and `--searchable`. `fm` (macOS with Apple Intelligence) is needed for `--rename`.
+A TypeSafe API key (same environment/Keychain configuration as `jev`) and `pdftotext` (poppler). A separate `jev` executable is not required. Add `ocrmypdf` for scanned PDFs and `--searchable`. `fm` (macOS with Apple Intelligence) is needed for `--rename`.
 
 ### Using a different OCR engine
 

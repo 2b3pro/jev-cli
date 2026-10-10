@@ -29,7 +29,7 @@ Wraps TypeSafe AI Jev (`POST /v1/systemone`): fast calibrated classification of 
 - choice answer: `{type, choice, confidence, probabilities: {label: p}}`
 - score answer: `{type, score, confidence, legend: {i: desc}, probabilities: {i: p}}`
 
-batch default line: `{line, input, model, answers, usage, request_id}`; failed line: `{line, input, error: {message, status?, request_id?}}`. Lines come out in input order.
+batch default line: `{line, input, model, answers, usage, request_id}`; failed line: `{line, input, error: {message, status?, request_id?}}`. Lines come out in input order, starting before stdin closes. Reading and result buffering are bounded by concurrency (plus the current input chunk/line), and slow stdout consumers pause processing. Concurrency is not a requests-per-second limit.
 
 ## Exit codes
 

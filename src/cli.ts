@@ -5,13 +5,13 @@
 
 import type { Question, TypeSafeClient } from "@typesafe-ai/sdk";
 import { numberFlag, parseArgs, UsageError, type ParsedArgs } from "./args.ts";
-import { parseBatchInput, runBatch } from "./batch.ts";
+import { parseBatchLines, runBatch } from "./batch.ts";
 import { createClient, defaultModel, describeError, getLogger } from "./client.ts";
 import { processIo, resolveState, type Io } from "./io.ts";
 import { answerValue, flattenAnswers, type Answer } from "./output.ts";
 import { choiceQuestion, loadPreset, scoreQuestion, yesNoQuestion } from "./questions.ts";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 
 /** Exit codes. `gate` uses FAIL for "no"; every error is ERROR, so FAIL is never ambiguous. */
 export const EXIT = { OK: 0, FAIL: 1, ERROR: 2 } as const;
@@ -202,8 +202,7 @@ async function batch(ctx: Context): Promise<number> {
 
   const preset = await loadPreset(ref, ctx.io);
   const concurrency = numberFlag("concurrency", values.concurrency, { min: 1, max: 32, integer: true }) ?? 8;
-  const items = parseBatchInput(await ctx.io.readStdin());
-  if (items.length === 0) throw new UsageError("batch input is empty");
+  const items = parseBatchLines(ctx.io.readLines());
 
   const options = {
     questions: preset.questions,
@@ -214,8 +213,9 @@ async function batch(ctx: Context): Promise<number> {
     dryRun: ctx.args.dryRun,
   };
   const api = ctx.args.dryRun ? undefined : client(ctx);
-  const write = ctx.args.quiet ? () => {} : ctx.io.out;
+  const write = ctx.args.quiet ? () => {} : ctx.io.writeLine;
   const summary = await runBatch(items, api, options, write);
+  if (summary.total === 0) throw new UsageError("batch input is empty");
 
   if (!ctx.args.dryRun) {
     const log = await getLogger(ctx.io);

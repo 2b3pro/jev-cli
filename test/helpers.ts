@@ -80,6 +80,8 @@ export function fakeIo(options: FakeIoOptions = {}) {
   const err: string[] = [];
   const io: Io = {
     readStdin: async () => options.stdin ?? "",
+    readLines: async function* () { yield* (options.stdin ?? "").split(/\r?\n/); },
+    writeLine: async (line) => { out.push(line); },
     stdinIsTTY: options.stdin === undefined,
     readFile: async (path) => options.files?.[path],
     out: (line) => out.push(line),
